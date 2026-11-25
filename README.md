@@ -97,7 +97,7 @@ The default model is `tiny`, which uses less memory and is quickest on a CPU. Se
 
 ## Deployment notes
 
-This project is intentionally easiest and cheapest to run locally. A free cloud host may sleep, have limited memory, or not provide enough CPU/RAM for Whisper. For deployment, host the FastAPI API and SQLite file on a persistent machine/volume, set `CORS_ORIGINS` and `VITE_API_URL`, and serve the frontend over HTTPS. For a cloud deployment, do not store the SQLite file on an ephemeral filesystem.
+This project is intentionally easiest and cheapest to run locally. A free cloud host may sleep, have limited memory, or not provide enough CPU/RAM for Whisper. For deployment, host the FastAPI API and SQLite file on a persistent machine/volume, set `CORS_ORIGINS` and `VITE_API_URL`, and serve the frontend over HTTPS. Vercel uses `/tmp/transcriptions.db` by default so the function can initialize SQLite, but `/tmp` is ephemeral and data can be lost between instances or deployments; configure `DATABASE_PATH` only for a writable persistent volume or use an external database when transcription history must persist.
 
 ## Project structure
 

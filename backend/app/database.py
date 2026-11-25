@@ -5,7 +5,10 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-DATABASE_PATH = Path(os.getenv("DATABASE_PATH", Path(__file__).resolve().parents[1] / "transcriptions.db"))
+default_database_path = Path(__file__).resolve().parents[1] / "transcriptions.db"
+if os.getenv("VERCEL") == "1":
+    default_database_path = Path("/tmp/transcriptions.db")
+DATABASE_PATH = Path(os.getenv("DATABASE_PATH", str(default_database_path)))
 
 
 def connect() -> sqlite3.Connection:
