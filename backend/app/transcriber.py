@@ -1,41 +1,73 @@
-"""Lazy loader for the open-source Whisper transcription model."""
+"""Groq Whisper transcription for browser-captured PCM audio."""
 
 import os
+import wave
 from functools import lru_cache
+from io import BytesIO
 
-import numpy as np
-from faster_whisper import WhisperModel
+from groq import (
+    APIConnectionError,
+    APIStatusError,
+    AuthenticationError,
+    Groq,
+    RateLimitError,
+)
+
+
+class TranscriptionServiceError(Exception):
+    def __init__(self, status_code: int, detail: str):
+        self.status_code = status_code
+        self.detail = detail
+        super().__init__(detail)
 
 
 @lru_cache(maxsize=1)
-def get_model() -> WhisperModel:
-    # tiny is small and quick on CPU. Change WHISPER_MODEL to "base" for better accuracy.
-    model_name = os.getenv("WHISPER_MODEL", "tiny")
-    return WhisperModel(model_name, device="cpu", compute_type="int8")
+def _get_groq_client(api_key: str) -> Groq:
+    return Groq(api_key=api_key, timeout=60, max_retries=1)
 
 
 def transcribe_pcm(pcm_bytes: bytes, sample_rate: int) -> dict:
-    """Transcribe mono signed 16-bit PCM; resample to Whisper's 16 kHz input."""
     if not pcm_bytes:
         return {"text": "", "language": "unknown", "duration_seconds": 0.0}
 
-    samples = np.frombuffer(pcm_bytes, dtype="<i2").astype(np.float32) / 32768.0
-    if sample_rate != 16000:
-        old_positions = np.arange(len(samples), dtype=np.float64) / sample_rate
-        new_length = round(len(samples) * 16000 / sample_rate)
-        new_positions = np.arange(new_length, dtype=np.float64) / 16000
-        samples = np.interp(new_positions, old_positions, samples).astype(np.float32)
+    api_key = os.getenv("GROQ_API_KEY", "").strip()
+    if not api_key:
+        raise TranscriptionServiceError(
+            503, "Groq is not configured. Set GROQ_API_KEY on the backend."
+        )
 
-    segments, info = get_model().transcribe(
-        samples,
-        language=None,
-        beam_size=1,
-        vad_filter=True,
-        condition_on_previous_text=False,
-    )
-    text = " ".join(segment.text.strip() for segment in segments).strip()
+    wav_buffer = BytesIO()
+    with wave.open(wav_buffer, "wb") as audio_file:
+        audio_file.setnchannels(1)
+        audio_file.setsampwidth(2)
+        audio_file.setframerate(sample_rate)
+        audio_file.writeframes(pcm_bytes)
+
+    try:
+        result = _get_groq_client(api_key).audio.transcriptions.create(
+            file=("recording.wav", wav_buffer.getvalue(), "audio/wav"),
+            model=os.getenv("GROQ_MODEL", "whisper-large-v3-turbo"),
+            response_format="verbose_json",
+        )
+    except AuthenticationError as error:
+        raise TranscriptionServiceError(
+            503, "Groq rejected the configured API key. Check GROQ_API_KEY."
+        ) from error
+    except RateLimitError as error:
+        raise TranscriptionServiceError(
+            429, "Groq rate limit reached. Please try again shortly."
+        ) from error
+    except APIConnectionError as error:
+        raise TranscriptionServiceError(
+            502, "Could not connect to the Groq transcription service."
+        ) from error
+    except APIStatusError as error:
+        raise TranscriptionServiceError(
+            502, f"Groq transcription failed with status {error.status_code}."
+        ) from error
+
     return {
-        "text": text,
-        "language": info.language or "unknown",
-        "duration_seconds": round(len(pcm_bytes) / 2 / sample_rate, 2),
+        "text": result.text.strip(),
+        "language": getattr(result, "language", None) or "unknown",
+        "duration_seconds": round(len(pcm_bytes) / (2 * sample_rate), 2),
     }

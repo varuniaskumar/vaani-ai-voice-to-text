@@ -1,13 +1,35 @@
-from contextlib import asynccontextmanager
-import os
+"""FastAPI application for Vaani speech transcription."""
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+import base64
+import binascii
+import os
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from starlette.concurrency import run_in_threadpool
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
+load_dotenv(PROJECT_ROOT / ".env")
 
 from .database import database_session, initialize_database, row_to_dict
-from .transcriber import transcribe_pcm
+from .transcriber import TranscriptionServiceError, transcribe_pcm
+
+MAX_PCM_BYTES = 3 * 1024 * 1024
+LOCAL_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
+configured_origins = os.getenv("CORS_ORIGINS", "").split(",")
+allowed_origins = list(
+    dict.fromkeys(
+        origin.strip().rstrip("/")
+        for origin in [*LOCAL_ORIGINS, *configured_origins]
+        if origin.strip()
+    )
+)
 
 
 @asynccontextmanager
@@ -17,18 +39,9 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Speech to Text API", version="1.0.0", lifespan=lifespan)
-local_origins = ["http://127.0.0.1:5173", "http://localhost:5173"]
-configured_origins = os.getenv("CORS_ORIGINS", "").split(",")
-origins = list(
-    dict.fromkeys(
-        origin.strip().rstrip("/")
-        for origin in [*local_origins, *configured_origins]
-        if origin.strip()
-    )
-)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -39,7 +52,7 @@ class TranscriptionCreate(BaseModel):
     text: str = Field(min_length=1)
     language: str = "unknown"
     duration_seconds: float = Field(default=0, ge=0)
-    title: str | None = None
+    title: str | None = Field(default=None, max_length=120)
 
 
 class TranscriptionUpdate(BaseModel):
@@ -48,19 +61,25 @@ class TranscriptionUpdate(BaseModel):
 
 
 class AudioRequest(BaseModel):
-    # PCM is base64 encoded by the browser so the same endpoint works with JSON.
-    audio_base64: str
+    audio_base64: str = Field(max_length=4_194_304)
     sample_rate: int = Field(default=16000, ge=8000, le=48000)
 
 
 @app.get("/")
 def root():
+    index_file = FRONTEND_DIST / "index.html"
+    if index_file.is_file():
+        return FileResponse(index_file)
     return {"name": "Speech to Text API", "status": "ok", "docs": "/docs"}
 
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "provider": "groq",
+        "configured": bool(os.getenv("GROQ_API_KEY", "").strip()),
+    }
 
 
 @app.get("/api/transcriptions")
@@ -74,13 +93,16 @@ def list_transcriptions():
 
 @app.post("/api/transcriptions", status_code=201)
 def create_transcription(payload: TranscriptionCreate):
-    title = (payload.title or payload.text[:48].strip() or "Untitled transcription")
+    title = payload.title or payload.text[:48].strip() or "Untitled transcription"
     with database_session() as connection:
         cursor = connection.execute(
-            "INSERT INTO transcriptions (title, text, language, duration_seconds) VALUES (?, ?, ?, ?)",
+            "INSERT INTO transcriptions (title, text, language, duration_seconds) "
+            "VALUES (?, ?, ?, ?)",
             (title, payload.text.strip(), payload.language, payload.duration_seconds),
         )
-        row = connection.execute("SELECT * FROM transcriptions WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        row = connection.execute(
+            "SELECT * FROM transcriptions WHERE id = ?", (cursor.lastrowid,)
+        ).fetchone()
     return row_to_dict(row)
 
 
@@ -90,68 +112,53 @@ def update_transcription(transcription_id: int, payload: TranscriptionUpdate):
     if not changes:
         raise HTTPException(status_code=400, detail="Provide a title or text to update")
     with database_session() as connection:
-        existing = connection.execute("SELECT id FROM transcriptions WHERE id = ?", (transcription_id,)).fetchone()
+        existing = connection.execute(
+            "SELECT id FROM transcriptions WHERE id = ?", (transcription_id,)
+        ).fetchone()
         if existing is None:
             raise HTTPException(status_code=404, detail="Transcription not found")
         assignments = ", ".join(f"{key} = ?" for key in changes)
         values = list(changes.values()) + [transcription_id]
         connection.execute(
-            f"UPDATE transcriptions SET {assignments}, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+            f"UPDATE transcriptions SET {assignments}, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
             values,
         )
-        row = connection.execute("SELECT * FROM transcriptions WHERE id = ?", (transcription_id,)).fetchone()
+        row = connection.execute(
+            "SELECT * FROM transcriptions WHERE id = ?", (transcription_id,)
+        ).fetchone()
     return row_to_dict(row)
 
 
 @app.delete("/api/transcriptions/{transcription_id}", status_code=204)
 def delete_transcription(transcription_id: int):
     with database_session() as connection:
-        cursor = connection.execute("DELETE FROM transcriptions WHERE id = ?", (transcription_id,))
+        cursor = connection.execute(
+            "DELETE FROM transcriptions WHERE id = ?", (transcription_id,)
+        )
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Transcription not found")
 
 
 @app.post("/api/transcribe")
 def transcribe_audio(payload: AudioRequest):
-    import base64
     try:
         pcm_bytes = base64.b64decode(payload.audio_base64, validate=True)
-    except (ValueError, TypeError):
-        raise HTTPException(status_code=400, detail="Invalid base64 audio")
-    if len(pcm_bytes) > 50 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="Audio is too large (maximum 50 MB)")
+    except (binascii.Error, ValueError, TypeError) as error:
+        raise HTTPException(status_code=400, detail="Invalid base64 audio") from error
+
+    if len(pcm_bytes) > MAX_PCM_BYTES:
+        raise HTTPException(status_code=413, detail="Audio chunk exceeds the 3 MB limit")
     if len(pcm_bytes) % 2:
-        raise HTTPException(status_code=400, detail="Audio must contain complete 16-bit samples")
+        raise HTTPException(
+            status_code=400, detail="Audio must contain complete 16-bit samples"
+        )
+
     try:
         return transcribe_pcm(pcm_bytes, payload.sample_rate)
-    except Exception as error:
-        raise HTTPException(status_code=503, detail=f"Transcription failed: {error}") from error
+    except TranscriptionServiceError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.detail) from error
 
 
-@app.websocket("/api/live")
-async def live_preview(websocket: WebSocket):
-    """Accept raw 16 kHz PCM and return rolling 4-second transcript previews."""
-    await websocket.accept()
-    pcm = bytearray()
-    last_transcribed = 0
-    window_bytes = 4 * 16000 * 2
-    hop_bytes = 2 * 16000 * 2
-    try:
-        while True:
-            message = await websocket.receive()
-            if message.get("bytes") is None:
-                continue
-            pcm.extend(message["bytes"])
-            if len(pcm) >= window_bytes and len(pcm) - last_transcribed >= hop_bytes:
-                start = max(0, len(pcm) - window_bytes)
-                preview = await run_in_threadpool(transcribe_pcm, bytes(pcm[start:]), 16000)
-                await websocket.send_json({"type": "preview", **preview})
-                last_transcribed = len(pcm)
-    except WebSocketDisconnect:
-        pass
-    except Exception as error:
-        try:
-            await websocket.send_json({"type": "error", "message": str(error)})
-            await websocket.close(code=1011)
-        except Exception:
-            pass
+if FRONTEND_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")

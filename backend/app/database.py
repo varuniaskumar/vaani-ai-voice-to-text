@@ -1,25 +1,32 @@
-"""Small SQLite helpers. The database file is created on first startup."""
+"""SQLite persistence for saved transcription history."""
 
 import os
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
-default_database_path = Path(__file__).resolve().parents[1] / "transcriptions.db"
-if os.getenv("VERCEL") == "1":
-    default_database_path = Path("/tmp/transcriptions.db")
-DATABASE_PATH = Path(os.getenv("DATABASE_PATH", str(default_database_path)))
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+default_database_path = (
+    Path("/tmp/transcriptions.db")
+    if os.getenv("VERCEL") == "1"
+    else BACKEND_ROOT / "transcriptions.db"
+)
+configured_database_path = os.getenv("DATABASE_PATH")
+DATABASE_PATH = Path(configured_database_path) if configured_database_path else default_database_path
+if not DATABASE_PATH.is_absolute():
+    DATABASE_PATH = BACKEND_ROOT / DATABASE_PATH
 
 
 def connect() -> sqlite3.Connection:
-    connection = sqlite3.connect(DATABASE_PATH)
+    connection = sqlite3.connect(DATABASE_PATH, timeout=10)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
 
 
 @contextmanager
-def database_session():
+def database_session() -> Iterator[sqlite3.Connection]:
     connection = connect()
     try:
         yield connection
