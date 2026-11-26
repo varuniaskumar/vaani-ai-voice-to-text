@@ -1,1 +1,5 @@
--r backend/requirements.txt
+# Keep runtime dependencies explicit in the repository-root manifest for Vercel.
+fastapi>=0.115,<1.0
+groq>=0.11,<1.0
+python-dotenv>=1.0,<2.0
+uvicorn[standard]>=0.30,<1.0
