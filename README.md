@@ -102,7 +102,7 @@ When the Vite build exists, `/` serves the frontend. On a backend-only local run
 
 Deploy the frontend and FastAPI backend as one Vercel project:
 
-1. Import the repository and set **Root Directory** to the repository root. Use the **FastAPI** framework preset (or **Other** if it is not offered); leave the dashboard Build Command, Output Directory, and Install Command overrides blank. Vercel reads `requirements.txt`, uses the root `main.py` entrypoint, and runs the frontend build from `[tool.vercel.scripts]` in `pyproject.toml`.
+1. Import the repository and set **Root Directory** to the repository root. Use the **FastAPI** framework preset (or **Other** if it is not offered); leave the dashboard Build Command, Output Directory, and Install Command overrides blank. The runtime dependencies are declared in `[project.dependencies]` in `pyproject.toml` and mirrored in the root `requirements.txt`; the root `main.py` is the ASGI entrypoint, and `[tool.vercel.scripts]` builds the frontend.
 2. Add `GROQ_API_KEY` in Vercel **Settings → Environment Variables** for Production and Preview, then redeploy. Optionally add `GROQ_MODEL`. Never create a `VITE_GROQ_API_KEY` variable.
 3. Leave `VITE_API_URL` unset so the frontend uses same-origin `/api` requests. `CORS_ORIGINS` is unnecessary for this same-origin setup; add it only if another site must call the API.
 
@@ -112,8 +112,8 @@ The Vercel deployment serves the Vite build at `/` and the FastAPI endpoints und
 
 ```text
 main.py               # Root Vercel ASGI entrypoint
-pyproject.toml        # Vercel build and static-file configuration
-requirements.txt      # Root dependency manifest for Vercel
+pyproject.toml        # Python dependencies, Vercel build, and static-file configuration
+requirements.txt      # Root pip dependency manifest (mirrors pyproject.toml)
 vercel.json           # Single-project Vercel function configuration
 backend/
   main.py             # Optional backend-only ASGI entrypoint
