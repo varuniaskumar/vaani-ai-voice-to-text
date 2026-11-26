@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { AudioLines, Check, ChevronDown, CircleHelp, Clock3, Copy, FileAudio2, Languages, LoaderCircle, Mic, Plus, Search, Settings2, Sparkles, Square, Trash2, WandSparkles, X } from 'lucide-react'
 
-const API = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? '' : 'http://127.0.0.1:8000')
+const API = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '')
 
 function formatDuration(seconds = 0) {
   const total = Math.round(seconds)

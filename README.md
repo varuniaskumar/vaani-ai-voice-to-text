@@ -94,13 +94,17 @@ The default model is `tiny`, which uses less memory and is quickest on a CPU. Se
 
 - `WHISPER_MODEL`: `tiny`, `base`, or `small` (default: `tiny`)
 - `DATABASE_PATH`: SQLite database file (default: `backend/transcriptions.db`)
-- `CORS_ORIGINS`: comma-separated allowed frontend origins (default: `http://127.0.0.1:5173,http://localhost:5173`)
+- `CORS_ORIGINS`: comma-separated frontend origins; local Vite origins are always included, add the deployed frontend origin on the API host
 - `VITE_API_PROXY_TARGET`: backend target for the Vite development proxy (default: `http://127.0.0.1:8000`)
-- `VITE_API_URL`: optional direct API base URL for the frontend; local development uses the Vite proxy by default
+- `VITE_API_URL`: required production frontend API base URL; local development uses the Vite proxy by default
 
 ## Deployment notes
 
-This project is intentionally easiest and cheapest to run locally. A free cloud host may sleep, have limited memory, or not provide enough CPU/RAM for Whisper. For deployment, host the FastAPI API and SQLite file on a persistent machine/volume, set `CORS_ORIGINS` and `VITE_API_URL`, and serve the frontend over HTTPS. Vercel uses `/tmp/transcriptions.db` by default so the function can initialize SQLite, but `/tmp` is ephemeral and data can be lost between instances or deployments; configure `DATABASE_PATH` only for a writable persistent volume or use an external database when transcription history must persist.
+For a Vercel frontend deployment, add `VITE_API_URL` in the Vercel project's Environment Variables and set it to the public FastAPI base URL, for example `https://your-api.example.com` (no trailing slash and no `/api` suffix). Set it for each environment you deploy (Production, Preview, and Development as applicable), then redeploy so Vite includes the value in the build.
+
+On the service hosting FastAPI, set `CORS_ORIGINS` to the exact frontend origin, for example `https://your-app.vercel.app`. Include any additional Vercel preview origins as comma-separated values. Do not include URL paths or a trailing slash. The two local origins (`http://localhost:5173` and `http://127.0.0.1:5173`) remain allowed automatically. If FastAPI is also hosted on Vercel, configure `CORS_ORIGINS` in that backend project's settings, not only in the frontend project.
+
+The backend must be publicly reachable over HTTPS for the deployed app. The frontend keeps using the Vite proxy locally; production requests and live WebSocket connections use `VITE_API_URL`. A free cloud host may sleep, have limited memory, or not provide enough CPU/RAM for Whisper. Vercel uses `/tmp/transcriptions.db` by default so a function can initialize SQLite, but `/tmp` is ephemeral and data can be lost between instances or deployments; configure `DATABASE_PATH` only for a writable persistent volume or use an external database when transcription history must persist.
 
 ## Project structure
 

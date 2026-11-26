@@ -17,13 +17,18 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Speech to Text API", version="1.0.0", lifespan=lifespan)
-origins = os.getenv(
-    "CORS_ORIGINS",
-    "http://127.0.0.1:5173,http://localhost:5173",
-).split(",")
+local_origins = ["http://127.0.0.1:5173", "http://localhost:5173"]
+configured_origins = os.getenv("CORS_ORIGINS", "").split(",")
+origins = list(
+    dict.fromkeys(
+        origin.strip().rstrip("/")
+        for origin in [*local_origins, *configured_origins]
+        if origin.strip()
+    )
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[origin.strip() for origin in origins],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

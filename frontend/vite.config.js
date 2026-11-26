@@ -5,6 +5,10 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const apiTarget = env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8000'
 
+  if (mode === 'production' && !env.VITE_API_URL) {
+    throw new Error('VITE_API_URL must be set to the deployed FastAPI base URL for production builds.')
+  }
+
   return {
     plugins: [react()],
     server: {
