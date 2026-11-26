@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { AudioLines, Check, ChevronDown, CircleHelp, Clock3, Copy, FileAudio2, Languages, LoaderCircle, Mic, Plus, Search, Settings2, Sparkles, Square, Trash2, WandSparkles, X } from 'lucide-react'
 
-const API = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '')
+const API = import.meta.env.PROD ? '' : (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '')
 
 function formatDuration(seconds = 0) {
   const total = Math.round(seconds)
@@ -32,6 +32,33 @@ function base64FromInt16(samples) {
   const step = 0x8000
   for (let i = 0; i < bytes.length; i += step) binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + step, bytes.length)))
   return btoa(binary)
+}
+
+const TRANSCRIPTION_CHUNK_SAMPLES = 20 * 16000
+
+function takeSamples(chunks, sampleCount) {
+  const samples = new Int16Array(sampleCount)
+  let offset = 0
+  while (offset < sampleCount) {
+    const chunk = chunks[0]
+    const length = Math.min(chunk.length, sampleCount - offset)
+    samples.set(chunk.subarray(0, length), offset)
+    offset += length
+    if (length === chunk.length) chunks.shift()
+    else chunks[0] = chunk.subarray(length)
+  }
+  return samples
+}
+
+async function transcribeSamples(samples) {
+  const response = await fetch(`${API}/api/transcribe`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ audio_base64: base64FromInt16(samples), sample_rate: 16000 }),
+  })
+  const result = await response.json()
+  if (!response.ok) throw new Error(result.detail || 'Transcription failed')
+  return result
 }
 
 function App() {
@@ -80,23 +107,48 @@ function App() {
       const processor = context.createScriptProcessor(4096, 1, 1)
       const muteOutput = context.createGain()
       muteOutput.gain.value = 0
-      const socketUrl = API
-        ? `${API.replace(/^http/, 'ws')}/api/live`
-        : `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/api/live`
-      const socket = new WebSocket(socketUrl)
-      const chunks = []
-      socket.onmessage = (event) => {
-        const message = JSON.parse(event.data)
-        if (message.type === 'preview') setLiveText(message.text)
-        if (message.type === 'error') setError(message.message)
+      const current = {
+        stream,
+        context,
+        source,
+        processor,
+        muteOutput,
+        pendingChunks: [],
+        pendingSampleCount: 0,
+        sampleCount: 0,
+        transcriptionQueue: Promise.resolve(),
+        transcriptionResults: [],
+        transcriptionError: '',
+      }
+      const enqueueTranscription = (samples) => {
+        current.transcriptionQueue = current.transcriptionQueue.then(async () => {
+          if (current.transcriptionError) return
+          try {
+            const result = await transcribeSamples(samples)
+            current.transcriptionResults.push(result)
+            setLiveText(current.transcriptionResults.map((item) => item.text).filter(Boolean).join(' '))
+          } catch (e) {
+            current.transcriptionError = e.message
+            setError(e.message)
+          }
+        })
+      }
+      current.flushPending = (flushRemainder = false) => {
+        while (current.pendingSampleCount >= TRANSCRIPTION_CHUNK_SAMPLES || (flushRemainder && current.pendingSampleCount > 0)) {
+          const sampleCount = Math.min(TRANSCRIPTION_CHUNK_SAMPLES, current.pendingSampleCount)
+          enqueueTranscription(takeSamples(current.pendingChunks, sampleCount))
+          current.pendingSampleCount -= sampleCount
+        }
       }
       processor.onaudioprocess = (event) => {
         const samples = resampleTo16k(event.inputBuffer.getChannelData(0), context.sampleRate)
-        chunks.push(samples)
-        if (socket.readyState === WebSocket.OPEN) socket.send(samples.buffer.slice(0))
+        current.pendingChunks.push(samples)
+        current.pendingSampleCount += samples.length
+        current.sampleCount += samples.length
+        current.flushPending()
       }
+      recorder.current = current
       source.connect(processor); processor.connect(muteOutput); muteOutput.connect(context.destination)
-      recorder.current = { stream, context, source, processor, muteOutput, socket, chunks }
     } catch (e) {
       setStatus('idle'); setError(e.name === 'NotAllowedError' ? 'Allow microphone access in your browser to start recording.' : `Could not start microphone: ${e.message}`)
     }
@@ -108,18 +160,17 @@ function App() {
     setStatus('processing'); setNotice('Transcribing your recording…')
     current.processor.disconnect(); current.muteOutput.disconnect(); current.source.disconnect(); current.stream.getTracks().forEach((track) => track.stop())
     await current.context.close()
-    if (current.socket.readyState === WebSocket.OPEN) current.socket.close()
-    const joined = new Int16Array(current.chunks.reduce((sum, chunk) => sum + chunk.length, 0))
-    let offset = 0
-    current.chunks.forEach((chunk) => { joined.set(chunk, offset); offset += chunk.length })
+    current.flushPending(true)
+    await current.transcriptionQueue
     recorder.current = null
     try {
-      const response = await fetch(`${API}/api/transcribe`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ audio_base64: base64FromInt16(joined), sample_rate: 16000 }) })
-      const result = await response.json()
-      if (!response.ok) throw new Error(result.detail || 'Transcription failed')
-      const finalText = result.text || liveText
+      if (current.transcriptionError) throw new Error(current.transcriptionError)
+      const results = current.transcriptionResults
+      const finalText = results.map((result) => result.text).filter(Boolean).join(' ') || liveText
       if (!finalText.trim()) throw new Error('No speech detected. Try speaking a little closer to the microphone.')
-      const saved = await fetch(`${API}/api/transcriptions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: finalText, language: result.language, duration_seconds: result.duration_seconds }) })
+      const language = results.find((result) => result.language && result.language !== 'unknown')?.language || 'unknown'
+      const durationSeconds = Math.round(current.sampleCount / 16000 * 100) / 100
+      const saved = await fetch(`${API}/api/transcriptions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: finalText, language, duration_seconds: durationSeconds }) })
       if (!saved.ok) throw new Error('Transcription succeeded but could not be saved')
       const item = await saved.json()
       setItems((previous) => [item, ...previous]); setActive(item); setNotice('Transcription saved'); setLiveText('')
@@ -163,12 +214,12 @@ function App() {
           <span className="history-file"><FileAudio2 size={17} /></span><span className="history-copy"><strong>{item.title}</strong><small>{formatDate(item.created_at)}</small></span><span className="history-duration">{formatDuration(item.duration_seconds)}</span>
         </button>) : <div className="empty-history">{query ? 'No matches found' : 'Your saved transcripts will appear here.'}</div>}
       </div>
-      <div className="sidebar-bottom"><div className="plan-card"><div className="plan-icon"><Sparkles size={15} /></div><div><strong>All yours, always</strong><p>Audio is processed on your machine.</p></div></div><button className="profile"><div className="avatar">V</div><span><strong>My workspace</strong><small>Local account</small></span><ChevronDown size={16} /></button></div>
+      <div className="sidebar-bottom"><div className="plan-card"><div className="plan-icon"><Sparkles size={15} /></div><div><strong>All yours, always</strong><p>Audio is transcribed by Groq Whisper.</p></div></div><button className="profile"><div className="avatar">V</div><span><strong>My workspace</strong><small>Local account</small></span><ChevronDown size={16} /></button></div>
     </aside>
 
     <main className="main-panel">
       <header className="topbar"><div className="breadcrumbs">Workspace <span>/</span> <strong>{active?.title || 'New transcription'}</strong></div><div className="top-actions"><span className="secure"><span className="green-dot" /> Private workspace</span><button className="icon-button" title="Settings" onClick={() => setShowSettings((value) => !value)}><Settings2 size={18} /></button><button className="help-button" title="Help"><CircleHelp size={18} /></button></div></header>
-      {showSettings && <div className="settings-popover"><div className="settings-title"><strong>Model settings</strong><button onClick={() => setShowSettings(false)}><X size={15} /></button></div><div className="model-setting"><span>Local Whisper model</span><strong>tiny · fastest</strong></div><p>To change it, set <code>WHISPER_MODEL</code> to <code>base</code> or <code>small</code> in the backend environment, then restart the API.</p></div>}
+      {showSettings && <div className="settings-popover"><div className="settings-title"><strong>Model settings</strong><button onClick={() => setShowSettings(false)}><X size={15} /></button></div><div className="model-setting"><span>Groq Whisper model</span><strong>whisper-large-v3-turbo</strong></div><p>Set <code>GROQ_MODEL</code> in the backend environment to change the model, then restart the API.</p></div>}
       <section className="workspace-content">
         <div className="eyebrow"><span className="eyebrow-line" /> YOUR VOICE, IN EVERY LANGUAGE</div>
         <h1>Words, as they <span>happen.</span></h1><p className="intro">Speak naturally in any language. Your words appear in real time, ready to save, edit, and revisit.</p>
@@ -177,7 +228,7 @@ function App() {
             {languageMenu && <div className="language-menu">{['Auto detect', 'English', 'Hindi', 'Spanish', 'French'].map((option) => <button key={option} onClick={() => { setLanguage(option); setLanguageMenu(false) }}>{option}</button>)}<p>Whisper automatically detects the spoken language.</p></div>}
           </div>
           <div className="record-center"><div className={`mic-orb ${recording ? 'active' : ''}`}><div className="mic-orb-inner">{status === 'processing' ? <LoaderCircle className="spin" size={25} /> : <Mic size={25} />}</div><span className="orb-ring ring-one"/><span className="orb-ring ring-two"/></div>
-            <div className="record-status">{status === 'recording' ? <><strong>Your voice is being captured</strong><span>Speak naturally — language detection is automatic.</span></> : status === 'processing' ? <><strong>Turning speech into text…</strong><span>Your recording stays on this device.</span></> : <><strong>Ready to capture your thoughts?</strong><span>Click the microphone and start speaking.</span></>}</div>
+            <div className="record-status">{status === 'recording' ? <><strong>Your voice is being captured</strong><span>Speak naturally — language detection is automatic.</span></> : status === 'processing' ? <><strong>Turning speech into text…</strong><span>Audio is sent to Groq for transcription.</span></> : <><strong>Ready to capture your thoughts?</strong><span>Click the microphone and start speaking.</span></>}</div>
             <div className="timer">{formatDuration(seconds)}<span>{recording ? 'REC' : 'MIN'}</span></div>
           </div>
           <div className="waveform" aria-label="Audio activity visualization">{Array.from({ length: 47 }, (_, index) => <span key={index} style={{ '--h': `${recording ? 10 + Math.abs(Math.sin(index * 1.7 + seconds) * Math.cos(index / 3)) * 30 : 5 + Math.abs(Math.sin(index * 2.3)) * 8}px`, '--d': `${index * 14}ms` }} />)}</div>

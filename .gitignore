@@ -6,6 +6,9 @@ venv/
 node_modules/
 dist/
 .env
+.env.*
+!.env.example
+.vercel/
 .DS_Store
 /tools/node-v24.22.3-win-x64/
 backend/*-live.log
