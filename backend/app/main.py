@@ -17,7 +17,10 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Speech to Text API", version="1.0.0", lifespan=lifespan)
-origins = os.getenv("CORS_ORIGINS", "http://127.0.0.1:5173").split(",")
+origins = os.getenv(
+    "CORS_ORIGINS",
+    "http://127.0.0.1:5173,http://localhost:5173",
+).split(",")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[origin.strip() for origin in origins],
@@ -43,6 +46,11 @@ class AudioRequest(BaseModel):
     # PCM is base64 encoded by the browser so the same endpoint works with JSON.
     audio_base64: str
     sample_rate: int = Field(default=16000, ge=8000, le=48000)
+
+
+@app.get("/")
+def root():
+    return {"name": "Speech to Text API", "status": "ok", "docs": "/docs"}
 
 
 @app.get("/api/health")

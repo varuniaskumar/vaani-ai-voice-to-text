@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { AudioLines, Check, ChevronDown, CircleHelp, Clock3, Copy, FileAudio2, Languages, LoaderCircle, Mic, Plus, Search, Settings2, Sparkles, Square, Trash2, WandSparkles, X } from 'lucide-react'
 
-const API = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8001'
+const API = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? '' : 'http://127.0.0.1:8000')
 
 function formatDuration(seconds = 0) {
   const total = Math.round(seconds)
@@ -80,7 +80,10 @@ function App() {
       const processor = context.createScriptProcessor(4096, 1, 1)
       const muteOutput = context.createGain()
       muteOutput.gain.value = 0
-      const socket = new WebSocket(API.replace(/^http/, 'ws') + '/api/live')
+      const socketUrl = API
+        ? `${API.replace(/^http/, 'ws')}/api/live`
+        : `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/api/live`
+      const socket = new WebSocket(socketUrl)
       const chunks = []
       socket.onmessage = (event) => {
         const message = JSON.parse(event.data)

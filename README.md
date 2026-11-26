@@ -43,10 +43,10 @@ Install dependencies and start the API:
 
 ```powershell
 python -m pip install -r requirements.txt
-python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-The API docs are at <http://localhost:8000/docs>. The SQLite database `backend/transcriptions.db` is created automatically.
+The API docs are at <http://127.0.0.1:8000/docs>. The SQLite database `backend/transcriptions.db` is created automatically.
 
 ### 2. Start the React app
 
@@ -64,13 +64,14 @@ Open the local address Vite prints (normally <http://localhost:5173>), allow mic
 
 Node.js LTS is included as a project-local runtime under `tools/node-v24.22.3-win-x64`, and `.vscode/settings.json` adds it to new VS Code terminals. Open a **new** integrated terminal after opening this folder to use `node` and `npm` commands.
 
-To launch both services using VS Code tasks, choose **Terminal → Run Task → Vaani: API**, then open a second task terminal and choose **Terminal → Run Task → Vaani: Web**. These workspace tasks use API port `8001` because port `8000` may already be occupied, and serve the frontend on `5173`.
+To launch both services using VS Code tasks, choose **Terminal → Run Task → Vaani: API**, then open a second task terminal and choose **Terminal → Run Task → Vaani: Web**. The API listens on port `8000`, and the frontend on `5173` proxies API and WebSocket requests to it.
 
 - App: <http://localhost:5173>
-- API health: <http://127.0.0.1:8001/api/health>
-- API docs: <http://127.0.0.1:8001/docs>
+- API: <http://127.0.0.1:8000/>
+- API health: <http://127.0.0.1:8000/api/health>
+- API docs: <http://127.0.0.1:8000/docs>
 
-If you prefer separate terminals, run the API and frontend commands above. For the frontend terminal in this workspace, set `VITE_API_URL=http://127.0.0.1:8001` before `npm run dev`.
+If you prefer separate terminals, run the API and frontend commands above. During Vite development, `/api` requests are proxied to `http://127.0.0.1:8000`; set `VITE_API_PROXY_TARGET` to use another backend address. Set `VITE_API_URL` when the frontend should call an API directly, such as in a production deployment.
 
 ## Model size and language
 
@@ -80,6 +81,7 @@ The default model is `tiny`, which uses less memory and is quickest on a CPU. Se
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
+| `GET` | `/` | API status and docs link |
 | `GET` | `/api/health` | Check API status |
 | `GET` | `/api/transcriptions` | Read transcription history |
 | `POST` | `/api/transcriptions` | Save a transcription |
@@ -92,8 +94,9 @@ The default model is `tiny`, which uses less memory and is quickest on a CPU. Se
 
 - `WHISPER_MODEL`: `tiny`, `base`, or `small` (default: `tiny`)
 - `DATABASE_PATH`: SQLite database file (default: `backend/transcriptions.db`)
-- `CORS_ORIGINS`: comma-separated allowed frontend origins (default: `http://127.0.0.1:5173`)
-- `VITE_API_URL`: API base URL for the frontend (default: `http://127.0.0.1:8001`)
+- `CORS_ORIGINS`: comma-separated allowed frontend origins (default: `http://127.0.0.1:5173,http://localhost:5173`)
+- `VITE_API_PROXY_TARGET`: backend target for the Vite development proxy (default: `http://127.0.0.1:8000`)
+- `VITE_API_URL`: optional direct API base URL for the frontend; local development uses the Vite proxy by default
 
 ## Deployment notes
 
